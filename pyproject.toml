@@ -13,22 +13,7 @@ license = {text = "MIT"}
 [project.optional-dependencies]
 dev = [
     "ruff>=0.11.9",
-    "mypy>=1.15.0",
 ]
-
-[tool.pdm]
-distribution = false
-
-# external tools
-[tool.mypy]
-exclude = [".venv"]
-disallow_untyped_defs = true
-disallow_any_unimported = true
-no_implicit_optional = true
-check_untyped_defs = true
-warn_return_any = true
-warn_unused_ignores = true
-show_error_codes = true
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.

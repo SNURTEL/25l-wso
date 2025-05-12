@@ -1,0 +1,4 @@
+{
+    "python.analysis.ignore": [ "*" ], // disable pylance
+    "ruff.path": ["ruff" ], // use ruff from venv
+}
