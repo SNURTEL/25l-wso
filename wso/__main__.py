@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 import daemon.pidfile as pidfile
@@ -59,13 +60,15 @@ def get_domain_xml(name: str, n_cpus: int, memory_kib: int, bridge_iface_name: s
 
 
 def create_bridge_iface(name: str, physical_iface_name: str = PHYSICAL_IFACE_NAME):
+    assert len(name) <= 13
+
     connection = name
     iface = name
 
     nmcli.connection.add(name=connection, ifname=iface, conn_type="bridge", autoconnect=True)
 
     nmcli.connection.add(
-        name=f"{connection}-slave",
+        name=f"{connection}-s",
         ifname=physical_iface_name,
         conn_type="bridge-slave",
         options={"master": iface},
@@ -78,59 +81,64 @@ def create_bridge_iface(name: str, physical_iface_name: str = PHYSICAL_IFACE_NAM
 
 def destroy_bridge_iface(name: str):
     nmcli.connection.delete(name)
-    nmcli.connection.delete(f"{name}-slave")
+    nmcli.connection.delete(f"{name}-s")
 
 
-def main():
+def run_domain():
     logger = get_logger()
-    logger.info(f"Hello from {os.getpid()}")
     try:
-        logger.info(f"Connecting to {HYPERVISOR_URL}...")
-        conn = libvirt.open(HYPERVISOR_URL)
-    except libvirt.libvirtError:
-        logger.error(f"Failed to open connection to {HYPERVISOR_URL}")
+        logger.info(f"Hello from {os.getpid()}")
+        try:
+            logger.info(f"Connecting to {HYPERVISOR_URL}...")
+            conn = libvirt.open(HYPERVISOR_URL)
+        except libvirt.libvirtError:
+            logger.error(f"Failed to open connection to {HYPERVISOR_URL}")
+            sys.exit(1)
+
+        vm_id = str(uuid4())[:8]
+
+        bridge_iface = f"wso-{vm_id}"
+        logger.debug(f"Creating iface {bridge_iface}...")
+        create_bridge_iface(name=bridge_iface, physical_iface_name="wlp3s0")
+
+        domain_name = f"wso-{vm_id}"
+        domain_xml = get_domain_xml(
+            name=domain_name, n_cpus=2, memory_kib=2097152, bridge_iface_name=bridge_iface, iso_path=ISO_PATH
+        )
+
+        logger.debug(f"Creating domain {domain_name}...")
+        dom = conn.createXML(domain_xml)
+
+        try:
+            if not dom:
+                raise SystemExit("Failed to create a domain from an XML definition")
+
+            logger.info("Domain " + dom.name() + " has booted")
+            while dom.isActive():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt, shutting down the domain")
+        finally:
+            if dom:
+                dom.destroy()
+                logger.info("Domain " + dom.name() + " terminated")
+            conn.close()
+            destroy_bridge_iface(name=bridge_iface)
+            sys.exit(0)
+    except Exception as e:
+        logger.fatal(f"An error occurred: {e}; aborting")
+        logger.exception(e)
         sys.exit(1)
 
-    vm_id = str(uuid4())
 
-    bridge_iface = "wso-${vm_id}"
-    logger.debug("Creating iface ${bridge_iface}...")
-    create_bridge_iface(name=bridge_iface, physical_iface_name="wlp3s0")
-
-    domain_name = f"wso-{vm_id}"
-    domain_xml = get_domain_xml(
-        name=domain_name, n_cpus=2, memory_kib=2097152, bridge_iface_name=bridge_iface, iso_path=ISO_PATH
-    )
-
-    logger.debug(f"Creating domain {domain_name}...")
-    dom = conn.createXML(domain_xml)
-
-    try:
-        if not dom:
-            raise SystemExit("Failed to create a domain from an XML definition")
-
-        logger.info("Domain " + dom.name() + " has booted")
-        while dom.isActive():
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down the domain")
-    finally:
-        if dom:
-            dom.destroy()
-            logger.info("Domain " + dom.name() + " terminated")
-        conn.close()
-        destroy_bridge_iface(name=bridge_iface)
-        sys.exit(0)
-
-
-def main1():
+def daemonize(func: Callable[[], None]):
     import daemon
 
     _pidfile = pidfile.PIDLockFile(WORKDIR / "daemon.pid")
     print("Starting daemon")
     with daemon.DaemonContext(pidfile=_pidfile):
-        main()
+        func()
 
 
 if __name__ == "__main__":
-    main1()
+    daemonize(run_domain)
