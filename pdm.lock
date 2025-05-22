@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:1d8485ca7f05641f05ec3055d36c1e0af458426963b9e6149aa341a9567d692c"
+content_hash = "sha256:b5618b796a41f921aaaa76221fd4f8489d94c42de0260c03cb0710c723d8813b"
 
 [[metadata.targets]]
 requires_python = "==3.13.*"
@@ -21,6 +21,16 @@ files = [
 ]
 
 [[package]]
+name = "lockfile"
+version = "0.12.2"
+summary = "Platform-independent file locking module"
+groups = ["default"]
+files = [
+    {file = "lockfile-0.12.2-py2.py3-none-any.whl", hash = "sha256:6c3cb24f344923d30b2785d5ad75182c8ea7ac1b6171b08657258ec7429d50fa"},
+    {file = "lockfile-0.12.2.tar.gz", hash = "sha256:6aed02de03cba24efabcd600b30540140634fc06cfa603822d508d5361e9f799"},
+]
+
+[[package]]
 name = "nmcli"
 version = "1.5.0"
 requires_python = ">=3.7"
@@ -29,6 +39,20 @@ groups = ["default"]
 files = [
     {file = "nmcli-1.5.0-py3-none-any.whl", hash = "sha256:55e8cba0b4650f8d0741c9c403f8e33c6ad270b66bc23f9dc830214ef37b8429"},
     {file = "nmcli-1.5.0.tar.gz", hash = "sha256:6261dbd6f48b8454b7efc992f4285a5c126613a91a965d2c6c2caf749dec4ddf"},
+]
+
+[[package]]
+name = "python-daemon"
+version = "3.1.2"
+requires_python = ">=3.7"
+summary = "Library to implement a well-behaved Unix daemon process."
+groups = ["default"]
+dependencies = [
+    "lockfile>=0.10",
+]
+files = [
+    {file = "python_daemon-3.1.2-py3-none-any.whl", hash = "sha256:b906833cef63502994ad48e2eab213259ed9bb18d54fa8774dcba2ff7864cec6"},
+    {file = "python_daemon-3.1.2.tar.gz", hash = "sha256:f7b04335adc473de877f5117e26d5f1142f4c9f7cd765408f0877757be5afbf4"},
 ]
 
 [[package]]
