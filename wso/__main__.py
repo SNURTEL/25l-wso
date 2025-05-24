@@ -21,4 +21,4 @@ if __name__ == "__main__":
         hypervisor_url=HYPERVISOR_URL,
     )
 
-    daemonize(server.start)
+    daemonize(server.serve_forever)

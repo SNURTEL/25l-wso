@@ -1,14 +1,13 @@
+import asyncio
+from functools import partial
+
+import libvirt
 import nmcli
 
 from wso.config import PHYSICAL_IFACE_NAME, QEMU_BINARY_PATH
 
 
-def destroy_bridge_iface(name: str):
-    nmcli.connection.delete(name)
-    nmcli.connection.delete(f"{name}-s")
-
-
-def get_domain_xml(name: str, n_cpus: int, memory_kib: int, bridge_iface_name: str, iso_path):
+def _get_domain_xml(name: str, n_cpus: int, memory_kib: int, bridge_iface_name: str, iso_path):
     domain_xml = f"""
   <domain type='kvm'>
     <name>{name}</name>
@@ -35,21 +34,63 @@ def get_domain_xml(name: str, n_cpus: int, memory_kib: int, bridge_iface_name: s
     return domain_xml
 
 
-def create_bridge_iface(name: str, physical_iface_name: str = PHYSICAL_IFACE_NAME):
+async def launch_domain(
+    libvirt_connection: libvirt.virConnect,
+    name: str,
+    n_cpus: int,
+    memory_kib: int,
+    bridge_iface_name: str,
+    iso_path: str,
+) -> libvirt.virDomain:
+    domain_xml = _get_domain_xml(
+        name=name, n_cpus=2, memory_kib=2097152, bridge_iface_name=bridge_iface_name, iso_path=iso_path
+    )
+    dom = await asyncio.to_thread(partial(libvirt_connection.createXML, xmlDesc=domain_xml))
+    if not dom:
+        raise SystemExit("Failed to create a domain from an XML definition")
+    return dom
+
+
+async def destroy_domain(libvirt_connection: libvirt.virConnect, name: str):
+    dom = libvirt_connection.lookupByName(name)
+    if not dom:
+        raise SystemExit(f"Domain {name} not found")
+
+    await asyncio.to_thread(dom.destroy)
+
+
+async def create_bridge_iface(name: str, physical_iface_name: str = PHYSICAL_IFACE_NAME):
     assert len(name) <= 13
 
     connection = name
+    connection_slave = f"{name}-s"
     iface = name
 
-    nmcli.connection.add(name=connection, ifname=iface, conn_type="bridge", autoconnect=True)
-
-    nmcli.connection.add(
-        name=f"{connection}-s",
-        ifname=physical_iface_name,
-        conn_type="bridge-slave",
-        options={"master": iface},
-        autoconnect=True,
+    await asyncio.to_thread(
+        partial(nmcli.connection.add, name=connection, ifname=iface, conn_type="bridge", autoconnect=True)
     )
 
-    nmcli.connection.up(connection)
-    return {"connection": connection, "iface": iface}
+    await asyncio.to_thread(
+        partial(
+            nmcli.connection.add,
+            name=connection_slave,
+            ifname=physical_iface_name,
+            conn_type="bridge-slave",
+            options={"master": iface},
+            autoconnect=True,
+        )
+    )
+
+    await asyncio.to_thread(partial(nmcli.connection.up, connection))
+    return {"connection": connection, "connection-slave": connection_slave, "iface": iface}
+
+
+async def destroy_bridge_iface(name: str):
+    await asyncio.to_thread(partial(nmcli.connection.delete, name))
+    await asyncio.to_thread(partial(nmcli.connection.delete, f"{name}-s"))
+
+
+# DUMMY FUNCTION FOR DEBUGGING - to be replaced with actual health check
+def is_domain_active(libvirt_connection: libvirt.virConnect, name: str) -> bool:
+    dom = libvirt_connection.lookupByName(name)
+    return dom.isActive()

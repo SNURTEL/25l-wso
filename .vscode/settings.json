@@ -1,4 +1,9 @@
 {
     "python.analysis.ignore": [ "*" ], // disable pylance
-    "ruff.path": ["ruff" ], // use ruff from venv
+    "ruff.path": [
+        "ruff"
+    ],
+    "cSpell.words": [
+        "healthcheck"
+    ], // use ruff from venv
 }
