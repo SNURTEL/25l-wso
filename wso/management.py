@@ -1,13 +1,27 @@
 import asyncio
 import os
+import tempfile
 from functools import partial
+from pathlib import Path
 
 import libvirt
 
-from wso.config import QEMU_BINARY_PATH
+from wso.config import QEMU_BINARY_PATH, WORKDIR
 
 
-def _get_domain_xml(name: str, n_cpus: int, memory_kib: int, network_name: str, iso_path, static_ip: str = None):
+def _get_domain_xml(
+    name: str, n_cpus: int, memory_kib: int, network_name: str, iso_path, cloud_init_iso_path: str | None = None
+):
+    cloud_init_disk = ""
+    if cloud_init_iso_path:
+        cloud_init_disk = f"""
+      <disk type='file' device='cdrom'>
+        <driver name='qemu' type='raw'/>
+        <source file='{cloud_init_iso_path}'/>
+        <target dev='hdd' bus='ide'/>
+        <readonly/>
+      </disk>"""
+
     domain_xml = f"""
   <domain type='kvm'>
     <name>{name}</name>
@@ -30,10 +44,10 @@ def _get_domain_xml(name: str, n_cpus: int, memory_kib: int, network_name: str, 
         <source file='{iso_path}'/>
         <target dev='hdc' bus='ide'/>
         <readonly/>
-      </disk>
+      </disk>{cloud_init_disk}
       <disk type='file' device='disk'>
         <driver name='qemu' type='qcow2'/>
-        <source file='/tmp/wso-{name}-disk.qcow2'/>
+        <source file='{WORKDIR.resolve().absolute()}/wso-{name}-disk.qcow2'/>
         <target dev='vda' bus='virtio'/>
       </disk>
       <interface type='network'>
@@ -69,9 +83,9 @@ def _get_network_xml(name: str, bridge_name: str, subnet: str = "192.168.100"):
     return network_xml
 
 
-async def create_disk_image(domain_name: str, size_gb: int = 10):
+async def create_disk_image(domain_name: str, size_gb: int = 1):
     """Create a qcow2 disk image for the VM"""
-    disk_path = f"/tmp/wso-{domain_name}-disk.qcow2"
+    disk_path = WORKDIR / f"wso-{domain_name}-disk.qcow2"
     cmd = f"qemu-img create -f qcow2 {disk_path} {size_gb}G"
     process = await asyncio.create_subprocess_shell(cmd)
     await process.wait()
@@ -81,38 +95,19 @@ async def create_disk_image(domain_name: str, size_gb: int = 10):
 async def create_nat_network(
     libvirt_connection: libvirt.virConnect, network_name: str, bridge_name: str, subnet: str = "192.168.100"
 ) -> libvirt.virNetwork:
-    """Create a NAT network for VM internet access and host connectivity"""
-    # Validate bridge name length (Linux interface names max 15 chars)
     if len(bridge_name) > 15:
         raise ValueError(f"Bridge name '{bridge_name}' is too long (max 15 characters)")
 
-    try:
-        # Try to get existing network
-        network = libvirt_connection.networkLookupByName(network_name)
-        if network.isActive():
-            return network
-        else:
-            # Start the network if it exists but is not active
-            await asyncio.to_thread(network.create)
-            return network
-    except libvirt.libvirtError:
-        # Network doesn't exist, create it
-        network_xml = _get_network_xml(network_name, bridge_name, subnet)
-        network = await asyncio.to_thread(partial(libvirt_connection.networkCreateXML, network_xml))
-        if not network:
-            raise SystemExit(f"Failed to create network {network_name}")
-        return network
+    network_xml = _get_network_xml(network_name, bridge_name, subnet)
+    network = await asyncio.to_thread(partial(libvirt_connection.networkCreateXML, network_xml))
+    if not network:
+        raise SystemExit(f"Failed to create network {network_name}")
+    return network
 
 
 async def destroy_nat_network(libvirt_connection: libvirt.virConnect, network_name: str):
-    """Destroy a NAT network"""
-    try:
-        network = libvirt_connection.networkLookupByName(network_name)
-        if network.isActive():
-            await asyncio.to_thread(network.destroy)
-    except libvirt.libvirtError:
-        # Network doesn't exist or already destroyed
-        pass
+    network = libvirt_connection.networkLookupByName(network_name)
+    await asyncio.to_thread(network.destroy)
 
 
 async def launch_domain(
@@ -124,8 +119,11 @@ async def launch_domain(
     iso_path: str,
     static_ip: str = None,
 ) -> libvirt.virDomain:
-    # Create disk image for the VM
     await create_disk_image(name)
+
+    cloud_init_iso_path = None
+    if static_ip:
+        cloud_init_iso_path = await create_cloud_init_iso(name, static_ip)
 
     domain_xml = _get_domain_xml(
         name=name,
@@ -133,7 +131,7 @@ async def launch_domain(
         memory_kib=memory_kib,
         network_name=network_name,
         iso_path=iso_path,
-        static_ip=static_ip,
+        cloud_init_iso_path=cloud_init_iso_path,
     )
     dom = await asyncio.to_thread(partial(libvirt_connection.createXML, xmlDesc=domain_xml))
     if not dom:
@@ -148,86 +146,13 @@ async def destroy_domain(libvirt_connection: libvirt.virConnect, name: str):
 
     await asyncio.to_thread(dom.destroy)
 
-    # Clean up the disk image
-    disk_path = f"/tmp/wso-{name}-disk.qcow2"
-    try:
+    disk_path = WORKDIR / f"wso-{name}-disk.qcow2"
+    if os.path.exists(disk_path):
         os.remove(disk_path)
-    except FileNotFoundError:
-        pass  # Disk image doesn't exist or already removed
 
-
-# async def get_domain_ip_address(libvirt_connection: libvirt.virConnect, domain_name: str) -> str | None:
-#     """Get the IP address assigned to a domain via DHCP"""
-#     try:
-#         domain = libvirt_connection.lookupByName(domain_name)
-#         if not domain.isActive():
-#             return None
-
-#         # Get network interfaces
-#         interfaces = await asyncio.to_thread(domain.interfaceAddresses, 0)
-
-#         for interface_name, interface_info in interfaces.items():
-#             if interface_info["addrs"]:
-#                 for addr in interface_info["addrs"]:
-#                     if addr["type"] == 0:  # IPv4 address
-#                         return addr["addr"]
-#         return None
-#     except libvirt.libvirtError:
-#         return None
-
-
-# async def wait_for_domain_ip(libvirt_connection: libvirt.virConnect, domain_name: str, timeout: int = 60) -> str | None:
-#     """Wait for a domain to get an IP address"""
-#     import time
-
-#     start_time = time.time()
-
-#     while time.time() - start_time < timeout:
-#         ip = await get_domain_ip_address(libvirt_connection, domain_name)
-#         if ip:
-#             return ip
-#         await asyncio.sleep(2)
-
-#     return None
-
-
-# Legacy bridge functions - keeping for compatibility but not used with NAT setup
-# async def create_bridge_iface(name: str, physical_iface_name: str = PHYSICAL_IFACE_NAME):
-#     assert len(name) <= 13
-
-#     connection = name
-#     connection_slave = f"{name}-s"
-#     iface = name
-
-#     nmcli.connection.add(name=connection, ifname=iface, conn_type="bridge", autoconnect=True)
-
-#     nmcli.connection.add(
-#         name=connection_slave,
-#         ifname=physical_iface_name,
-#         conn_type="bridge-slave",
-#         options={"master": iface},
-#         autoconnect=True,
-#     )
-
-#     nmcli.connection.modify(
-#         connection,
-#         options={
-#             "bridge.stp": " no",
-#             "ipv4.method": "manual",
-#             "ipv4.addresses": "10.128.0.128/16",
-#             "ipv4.gateway": "10.1.1.1",
-#             "ipv4.dns": "10.1.1.1,8.8.8.8,8.8.4.4",
-#             "ipv4.dns-search": "example.com",
-#         },
-#     )
-
-#     await asyncio.to_thread(partial(nmcli.connection.up, connection))
-#     return {"connection": connection, "connection-slave": connection_slave, "iface": iface}
-
-
-# async def destroy_bridge_iface(name: str):
-#     await asyncio.to_thread(partial(nmcli.connection.delete, name))
-#     await asyncio.to_thread(partial(nmcli.connection.delete, f"{name}-s"))
+    cloud_init_iso_path = WORKDIR / f"wso-{name}-cloud-init.iso"
+    if os.path.exists(cloud_init_iso_path):
+        os.remove(cloud_init_iso_path)
 
 
 # DUMMY FUNCTION FOR DEBUGGING - to be replaced with actual health check
@@ -245,41 +170,121 @@ def generate_static_ip(domain_name: str, subnet: str = "192.168.100") -> str:
     return f"{subnet}.{ip_suffix}"
 
 
-async def create_network_config_script(domain_name: str, static_ip: str, gateway: str = "192.168.100.1") -> str:
-    """Create a network configuration script for Alpine Linux"""
-    # Create network configuration script for Alpine Linux
-    network_script = f"""#!/bin/sh
-# Network configuration script for {domain_name}
-
-# Configure eth0 with static IP
-ip addr add {static_ip}/24 dev eth0
-ip link set eth0 up
-ip route add default via {gateway}
-
-# Configure DNS
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-
-# Make configuration persistent
-cat > /etc/network/interfaces << EOF
-auto lo
-iface lo inet loopback
-
-auto eth0
-iface eth0 inet static
-    address {static_ip}
-    netmask 255.255.255.0
-    gateway {gateway}
-EOF
-
-echo "Network configured: {static_ip}"
+async def create_cloud_init_iso(domain_name: str, static_ip: str, gateway: str = "192.168.100.1") -> Path:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        meta_data = f"""instance-id: {domain_name}
+local-hostname: {domain_name}
 """
 
-    script_path = f"/tmp/wso-{domain_name}-netconfig.sh"
-    with open(script_path, "w") as f:
-        f.write(network_script)
+        # Create user-data file with network configuration
+        user_data = f"""#cloud-config
+hostname: {domain_name}
+manage_etc_hosts: true
 
-    # Make script executable
-    os.chmod(script_path, 0o755)
+# Network configuration
+write_files:
+  - path: /etc/network/interfaces
+    content: |
+      auto lo
+      iface lo inet loopback
 
-    return script_path
+      auto eth0
+      iface eth0 inet static
+          address {static_ip}
+          netmask 255.255.255.0
+          gateway {gateway}
+    permissions: '0644'
+
+  - path: /etc/resolv.conf
+    content: |
+      nameserver 8.8.8.8
+      nameserver 8.8.4.4
+    permissions: '0644'
+
+  - path: /etc/nginx/http.d/default.conf
+    content: |
+        server {{
+            listen 80 default_server;
+            listen [::]:80 default_server;
+
+            # Everything is a 404
+            location / {{
+                root   html;
+                index  index.html;
+            }}
+
+            # You may need this to prevent return 404 recursion.
+            location = /404.html {{
+                    internal;
+            }}
+        }}
+    permissions: '0644'
+
+  - path: /tmp/index.html
+    content: |
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Hello from {domain_name}</title>
+            <style>
+            html {{ color-scheme: light dark; }}
+            body {{ width: 35em; margin: 0 auto;
+            font-family: Tahoma, Verdana, Arial, sans-serif; }}
+            </style>
+        </head>
+        <body>
+            <h1>Hello from {domain_name}!</h1>
+            <p>Nginx running on {domain_name}, {static_ip} </p>
+        </body>
+        </html>
+    permissions: '0644'
+
+# Run commands to apply network configuration
+runcmd:
+  - ifdown eth0 || true
+  - ifup eth0
+  - echo "Network configured: {static_ip}"
+  - setup-apkrepos -1
+  - apk update
+  - apk add nginx
+  - service nginx start
+  - mv /tmp/index.html /var/lib/nginx/html/index.html
+
+# Ensure network service is enabled
+packages:
+  - ifupdown
+
+final_message: "Cloud-init configuration completed for {domain_name}"
+"""
+
+        meta_data_path = os.path.join(temp_dir, "meta-data")
+        user_data_path = os.path.join(temp_dir, "user-data")
+
+        with open(meta_data_path, "w") as f:
+            f.write(meta_data)
+
+        with open(user_data_path, "w") as f:
+            f.write(user_data)
+
+        iso_path = WORKDIR / f"wso-{domain_name}-cloud-init.iso"
+        cmd = [
+            "genisoimage",
+            "-output",
+            str(iso_path.resolve().absolute()),
+            "-volid",
+            "cidata",
+            "-joliet",
+            "-rock",
+            meta_data_path,
+            user_data_path,
+        ]
+
+        process = await asyncio.create_subprocess_exec(*cmd)
+        await process.wait()
+
+        if process.returncode != 0:
+            raise RuntimeError(f"Failed to create cloud-init ISO: {process.returncode}")
+
+        return Path(iso_path)

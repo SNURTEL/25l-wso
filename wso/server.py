@@ -18,7 +18,6 @@ import libvirt
 from wso.config import ISO_PATH
 from wso.management import (
     create_nat_network,
-    create_network_config_script,
     destroy_domain,
     destroy_nat_network,
     generate_static_ip,
@@ -105,28 +104,21 @@ class Server:
 
     async def launch_domain(self, domain_name: str, n_cpus: int, memory_kib: int, iso_path: str) -> DomainState:
         async with self.connection_context() as conn:
-            # Create NAT network for this domain
-            # Extract unique part from domain name (e.g., "wso-3332a2" -> "3332a2")
             domain_id = domain_name.replace("wso-", "")[:8]
             network_name = f"wso-net-{domain_id}"
-            bridge_name = f"virbr{domain_id[:8]}"  # Max 15 chars: "virbr" + 8 chars = 13 chars
+            bridge_name = f"virbr{domain_id[:8]}"
 
             self.logger.debug(f"Creating NAT network {network_name}...")
             await create_nat_network(
                 libvirt_connection=conn,
                 network_name=network_name,
                 bridge_name=bridge_name,
-                subnet="192.168.100",  # Each VM gets IPs in 192.168.100.x range
+                subnet="192.168.100",
             )
             self.logger.debug(f"Created NAT network {network_name}")
 
-            # Generate static IP for this domain
             static_ip = generate_static_ip(domain_name, subnet="192.168.100")
             self.logger.debug(f"Assigned static IP {static_ip} to domain {domain_name}")
-
-            # Create network configuration script
-            config_script = await create_network_config_script(domain_name, static_ip)
-            self.logger.debug(f"Created network config script: {config_script}")
 
             self.logger.debug(f"Creating domain {domain_name}...")
             domain = await launch_domain(
@@ -154,13 +146,18 @@ class Server:
         network_name = domain["network_name"]
 
         async with self.connection_context() as conn:
-            self.logger.debug(f"Destroying domain {domain_name}...")
-            await destroy_domain(libvirt_connection=conn, name=domain_name)
-            self.logger.info(f"Destroyed domain {domain_name}")
-
-            self.logger.debug(f"Destroying NAT network {network_name}...")
-            await destroy_nat_network(libvirt_connection=conn, network_name=network_name)
-            self.logger.debug(f"Destroyed NAT network {network_name}")
+            try:
+                self.logger.debug(f"Destroying domain {domain_name}...")
+                await destroy_domain(libvirt_connection=conn, name=domain_name)
+                self.logger.info(f"Destroyed domain {domain_name}")
+                await asyncio.sleep(1)
+                self.logger.debug(f"Destroying NAT network {network_name}...")
+                await destroy_nat_network(libvirt_connection=conn, network_name=network_name)
+                self.logger.debug(f"Destroyed NAT network {network_name}")
+            except Exception as e:
+                self.logger.error(f"Failed to destroy domain {domain_name} or network {network_name}: {e}")
+                self.logger.exception(e)
+                raise
 
     async def dummy(self):
         vm_id = str(uuid4())[:8]

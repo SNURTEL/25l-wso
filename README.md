@@ -9,7 +9,7 @@ sudo apt update && sudo apt install -y cpu-checker && kvm-ok
 ls /dev | grep kvm
 ```
 
-- `libvirt` and `pkg-config` packages
+- `libvirt`, `pkg-config` and `genisoimage` packages
 - `NetworkManager` and `nmcli`
 
 - Access to libvirt, kvm and `nmcli`. When running as a regular user:
