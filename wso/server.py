@@ -16,7 +16,15 @@ from uuid import uuid4
 import libvirt
 
 from wso.config import ISO_PATH
-from wso.management import create_bridge_iface, destroy_bridge_iface, destroy_domain, is_domain_active, launch_domain
+from wso.management import (
+    create_nat_network,
+    create_network_config_script,
+    destroy_domain,
+    destroy_nat_network,
+    generate_static_ip,
+    is_domain_active,
+    launch_domain,
+)
 from wso.utils import get_logger
 
 
@@ -36,7 +44,9 @@ class HealthCheckState(enum.StrEnum):
 
 class DomainState(TypedDict):
     domain_name: str
-    bridge_iface_name: str
+    network_name: str
+    bridge_name: str
+    ip_address: str | None
     healthcheck_state: HealthCheckState
     n_failed_healthchecks: int
 
@@ -95,41 +105,62 @@ class Server:
 
     async def launch_domain(self, domain_name: str, n_cpus: int, memory_kib: int, iso_path: str) -> DomainState:
         async with self.connection_context() as conn:
-            bridge_iface = f"br-{domain_name[:10]}"
-            self.logger.debug(f"Creating iface {bridge_iface}...")
-            await create_bridge_iface(name=bridge_iface)
-            self.logger.debug(f"Created iface {bridge_iface}")
+            # Create NAT network for this domain
+            # Extract unique part from domain name (e.g., "wso-3332a2" -> "3332a2")
+            domain_id = domain_name.replace("wso-", "")[:8]
+            network_name = f"wso-net-{domain_id}"
+            bridge_name = f"virbr{domain_id[:8]}"  # Max 15 chars: "virbr" + 8 chars = 13 chars
+
+            self.logger.debug(f"Creating NAT network {network_name}...")
+            await create_nat_network(
+                libvirt_connection=conn,
+                network_name=network_name,
+                bridge_name=bridge_name,
+                subnet="192.168.100",  # Each VM gets IPs in 192.168.100.x range
+            )
+            self.logger.debug(f"Created NAT network {network_name}")
+
+            # Generate static IP for this domain
+            static_ip = generate_static_ip(domain_name, subnet="192.168.100")
+            self.logger.debug(f"Assigned static IP {static_ip} to domain {domain_name}")
+
+            # Create network configuration script
+            config_script = await create_network_config_script(domain_name, static_ip)
+            self.logger.debug(f"Created network config script: {config_script}")
 
             self.logger.debug(f"Creating domain {domain_name}...")
             domain = await launch_domain(
                 libvirt_connection=conn,
                 name=domain_name,
-                n_cpus=2,
-                memory_kib=2097152,
-                bridge_iface_name=bridge_iface,
-                iso_path=ISO_PATH,
+                n_cpus=n_cpus,
+                memory_kib=memory_kib,
+                network_name=network_name,
+                iso_path=iso_path,
+                static_ip=static_ip,
             )
-            self.logger.info(f"Launched domain {domain.name()}")
+            self.logger.info(f"Launched domain {domain.name()} with static IP {static_ip}")
 
             return {
                 "domain_name": domain.name(),
-                "bridge_iface_name": bridge_iface,
+                "network_name": network_name,
+                "bridge_name": bridge_name,
+                "ip_address": static_ip,
                 "healthcheck_state": HealthCheckState.INITIALIZING,
                 "n_failed_healthchecks": 0,
             }
 
     async def destroy_domain(self, domain: DomainState):
         domain_name = domain["domain_name"]
-        bridge_iface_name = domain["bridge_iface_name"]
+        network_name = domain["network_name"]
 
         async with self.connection_context() as conn:
             self.logger.debug(f"Destroying domain {domain_name}...")
             await destroy_domain(libvirt_connection=conn, name=domain_name)
             self.logger.info(f"Destroyed domain {domain_name}")
 
-            self.logger.debug(f"Destroying interface {bridge_iface_name}...")
-            await destroy_bridge_iface(name=bridge_iface_name)
-            self.logger.debug(f"Destroyed interface {bridge_iface_name}")
+            self.logger.debug(f"Destroying NAT network {network_name}...")
+            await destroy_nat_network(libvirt_connection=conn, network_name=network_name)
+            self.logger.debug(f"Destroyed NAT network {network_name}")
 
     async def dummy(self):
         vm_id = str(uuid4())[:8]
