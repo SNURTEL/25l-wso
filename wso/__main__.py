@@ -1,12 +1,12 @@
 from typing import Callable
 
-import daemon.pidfile as pidfile
+import daemon.pidfile as pidfile  # type: ignore[import-untyped]
 
 from wso.config import HYPERVISOR_URL, WORKDIR
 from wso.server import Server
 
 
-def daemonize(func: Callable[[], None]):
+def daemonize(func: Callable[[], None]) -> None:
     import daemon
 
     _pidfile = pidfile.PIDLockFile(WORKDIR / "daemon.pid")

@@ -5,15 +5,30 @@ description = "Default template for PDM package"
 authors = [
     {name = "towienko", email = "tomek.owienko@gmail.com"},
 ]
-dependencies = ["libvirt-python>=11.3.0", "python-dotenv>=1.1.0", "nmcli>=1.5.0", "python-daemon>=3.1.2"]
+dependencies = ["libvirt-python>=11.3.0", "python-dotenv>=1.1.0", "python-daemon>=3.1.2"]
 requires-python = "==3.13.*"
 readme = "README.md"
 license = {text = "MIT"}
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.11.9",
+    "ruff>=0.11.11",
+    "mypy>=1.15.0",
 ]
+
+[tool.mypy]
+exclude = [".venv"]
+disallow_untyped_defs = true
+disallow_any_unimported = false
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "libvirt"
+ignore_missing_imports = true
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.

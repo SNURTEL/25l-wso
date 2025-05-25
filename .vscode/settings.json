@@ -6,4 +6,5 @@
     "cSpell.words": [
         "healthcheck"
     ], // use ruff from venv
+    "mypy.runUsingActiveInterpreter": true
 }
