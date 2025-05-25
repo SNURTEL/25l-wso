@@ -28,10 +28,30 @@ def _get_domain_xml(name: str, n_cpus: int, memory_kib: int, bridge_iface_name: 
         <model type='virtio'/>
       </interface>
       <graphics type='vnc' port='-1' keymap='de'/>
+      <serial type='pty'>
+        <target port='0'/>
+      </serial>
+      <console type='pty'>
+        <target type='serial' port='0'/>
+      </console>
     </devices>
   </domain>
   """
+
+    # DEFINE BRIDGE IFACE DIRECTLY IN VIRSH
+
     return domain_xml
+
+
+def _get_network_xml(name: str, bridge_iface_name: str):
+    network_xml = f"""
+    <network>
+        <name>{bridge_iface_name}</name>
+        <forward mode="bridge" />
+        <bridge name="{bridge_iface_name}" />
+    </network>
+    """
+    return network_xml
 
 
 async def launch_domain(
@@ -66,19 +86,26 @@ async def create_bridge_iface(name: str, physical_iface_name: str = PHYSICAL_IFA
     connection_slave = f"{name}-s"
     iface = name
 
-    await asyncio.to_thread(
-        partial(nmcli.connection.add, name=connection, ifname=iface, conn_type="bridge", autoconnect=True)
+    nmcli.connection.add(name=connection, ifname=iface, conn_type="bridge", autoconnect=True)
+
+    nmcli.connection.add(
+        name=connection_slave,
+        ifname=physical_iface_name,
+        conn_type="bridge-slave",
+        options={"master": iface},
+        autoconnect=True,
     )
 
-    await asyncio.to_thread(
-        partial(
-            nmcli.connection.add,
-            name=connection_slave,
-            ifname=physical_iface_name,
-            conn_type="bridge-slave",
-            options={"master": iface},
-            autoconnect=True,
-        )
+    nmcli.connection.modify(
+        connection,
+        options={
+            "bridge.stp": " no",
+            "ipv4.method": "manual",
+            "ipv4.addresses": "10.128.0.128/16",
+            "ipv4.gateway": "10.1.1.1",
+            "ipv4.dns": "10.1.1.1,8.8.8.8,8.8.4.4",
+            "ipv4.dns-search": "example.com",
+        },
     )
 
     await asyncio.to_thread(partial(nmcli.connection.up, connection))
