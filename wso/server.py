@@ -236,7 +236,7 @@ class Server:
                 self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
                 self._state_changed.set()
 
-            await asyncio.sleep(config.HEALTHCHECK_INTETRVAL)
+            await asyncio.sleep(config.HEALTHCHECK_INTERVAL)
 
     async def _start_domain_task(self, domain: Domain) -> None:
         try:

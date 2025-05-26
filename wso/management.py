@@ -33,7 +33,7 @@ def _get_domain_xml(
     </features>
     <clock sync="localtime"/>
     <devices>
-      <emulator>{QEMU_BINARY_PATH}</emulator>
+      <emulator>{QEMU_BINARY_PATH.resolve().absolute()}</emulator>
       <disk type='file' device='cdrom'>
         <driver name='qemu' type='raw'/>
         <source file='{iso_path}'/>
