@@ -19,14 +19,14 @@ from uuid import uuid4
 
 import libvirt
 
-from wso.config import ISO_PATH
+import wso.config as config
 from wso.management import (
     destroy_domain,
     destroy_nat_network,
     get_or_create_nat_network,
     launch_domain,
 )
-from wso.utils import get_logger
+from wso.utils import EnhancedJSONEncoder, get_logger
 
 
 class ServerState(TypedDict):
@@ -87,6 +87,8 @@ class Server:
     _state: ServerState
     _state_changed = asyncio.Event()
 
+    _healthcheck_tasks: dict[str, asyncio.Task[None]] = {}
+
     def __init__(self, workdir: Path, hypervisor_url: str):
         assert not (workdir.exists() and workdir.is_file()), f"Workdir {workdir} already exists and is a file"
         self.workdir = workdir
@@ -111,22 +113,11 @@ class Server:
 
         self._state_changed.set()
 
-    @property
-    def state(self) -> ServerState:
-        return self._state
-
-    @state.setter
-    def state(self, value: ServerState) -> None:
-        changed = self._state != value
-        self._state = value
-        self.write_state()
-        if changed:
-            self._state_changed.set()
-
     def write_state(self) -> None:
+        # honestly this is not critical, we can simply write state at program exit
         with self.state_file.open("w") as f:
             self.logger.debug(f"Saving state to {self.state_file}...")
-            json.dump(self._state, f, indent=2)
+            json.dump(self._state, f, indent=2, cls=EnhancedJSONEncoder)
 
     @property
     @functools.lru_cache
@@ -144,7 +135,8 @@ class Server:
             if conn:
                 await asyncio.to_thread(conn.close)
 
-    async def healthckeck_single(self, host: str, port: int, timeout_s: float = 1.0) -> None:
+    @staticmethod
+    async def healthckeck_single(host: str, port: int, timeout_s: float = 1.0) -> None:
         try:
             future = asyncio.open_connection(host, port)
             _, writer = await asyncio.wait_for(future, timeout=timeout_s)
@@ -212,28 +204,70 @@ class Server:
                 self.logger.exception(e)
                 raise
 
+    async def _healthcheck_task(self, domain: Domain) -> None:
+        self.logger.debug(
+            f"Waiting {config.HEALTHCHECK_START_DELAY} before starting healthcheck for domain {domain.domain_name}"
+        )
+        await asyncio.sleep(config.HEALTHCHECK_START_DELAY)
+        while True:
+            try:
+                await self.healthckeck_single(domain.ip_address, 80)
+                healthy = True
+            except HealthCheckFailureException as e:
+                self.logger.warning(f"Healthcheck failed for domain {domain.domain_name}: {e}")
+                healthy = False
+            domain = self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name]
+            if healthy and domain.n_success_healthchecks < config.HEALTHCHECK_HEALTHY_THRESHOLD:
+                domain.n_success_healthchecks += 1
+                if domain.n_success_healthchecks >= config.HEALTHCHECK_HEALTHY_THRESHOLD:
+                    domain.state = DomainState.HEALTHY
+                    domain.n_failed_healthchecks = 0
+                    self.logger.info(f"Domain {domain.domain_name} is healthy")
+                self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
+                self._state_changed.set()
+            elif not healthy and domain.n_failed_healthchecks < config.HEALTHCHECK_UNHEALTHY_THRESHOLD:
+                domain.n_failed_healthchecks += 1
+                if domain.n_failed_healthchecks >= config.HEALTHCHECK_UNHEALTHY_THRESHOLD:
+                    domain.state = DomainState.UNHEALTHY
+                    domain.n_success_healthchecks = 0
+                    self.logger.warning(f"Domain {domain.domain_name} is unhealthy, will be destroyed")
+                    self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
+                    self._state_changed.set()
+                self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
+                self._state_changed.set()
+
+            await asyncio.sleep(config.HEALTHCHECK_INTETRVAL)
+
     async def _start_domain_task(self, domain: Domain) -> None:
         try:
-            self.state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
+            self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
             # TODO this should not need to be done manually
             self._state_changed.set()
             launched_domain = await self.launch_domain(domain)
-            self.state["hypervisors"][self.hypervisor_url]["domains"][launched_domain.domain_name] = launched_domain
+            self._state["hypervisors"][self.hypervisor_url]["domains"][launched_domain.domain_name] = launched_domain
             self._state_changed.set()
+            self._healthcheck_tasks[launched_domain.domain_name] = asyncio.create_task(
+                self._healthcheck_task(launched_domain),
+                name=f"healthcheck {launched_domain.domain_name}",
+            )
         except Exception as e:
             self.logger.error(f"Failed to launch domain {domain.domain_name}: {e}")
             self.logger.exception(e)
-            del self.state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name]
+            del self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name]
             self._state_changed.set()
             raise e
 
     async def _destroy_domain_task(self, domain: Domain) -> None:
         try:
             domain.state = DomainState.TERMINATING
-            self.state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
+            self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
             self._state_changed.set()
+            if domain.domain_name in self._healthcheck_tasks.keys():
+                self.logger.debug(f"Cancelling healthcheck task for domain {domain.domain_name}")
+                self._healthcheck_tasks[domain.domain_name].cancel()
+                del self._healthcheck_tasks[domain.domain_name]
             await self.destroy_domain(domain)
-            del self.state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name]
+            del self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name]
         except Exception as e:
             self.logger.error(f"Failed to destroy domain {domain.domain_name}: {e}")
             self.logger.exception(e)
@@ -247,16 +281,16 @@ class Server:
 
             unhealthy_domains = [
                 domain
-                for domain in self.state["hypervisors"][self.hypervisor_url]["domains"].values()
+                for domain in self._state["hypervisors"][self.hypervisor_url]["domains"].values()
                 if domain.state == DomainState.UNHEALTHY
             ]
             for domain in unhealthy_domains:
-                self.logger.warning(f"Domain {domain.domain_name} is unhealthy, destroying it...")
+                self.logger.warning(f"Domain {domain.domain_name} is unhealthy, destroying")
                 asyncio.create_task(self._destroy_domain_task(domain), name=f"destroy {domain.domain_name}")
 
             running_domains = [
                 domain
-                for domain in self.state["hypervisors"][self.hypervisor_url]["domains"].values()
+                for domain in self._state["hypervisors"][self.hypervisor_url]["domains"].values()
                 if domain.state in (DomainState.LAUNCHING, DomainState.HEALTHY, DomainState.HEALTHCHECK_INITIALIZING)
             ]
 
@@ -268,38 +302,14 @@ class Server:
                     domain = Domain(
                         n_cpus=1,
                         memory_kib=1024 * 1024,
-                        iso_path=ISO_PATH,
+                        iso_path=config.ISO_PATH,
                         ip_address=self._generate_static_ip(subnet="192.168.100"),
                         ip_subnet="192.168.100",
                     )
                     asyncio.create_task(self._start_domain_task(domain), name=f"launch {domain.domain_name}")
-            else:
-                self.logger.info(f"{len(running_domains)} domains running, nothing to launch")
+
             self._state_changed.clear()
-            await asyncio.sleep(5)
-
-    # async def dummy(self) -> None:
-    #     domain = Domain(
-    #         n_cpus=2,
-    #         memory_kib=2097152,
-    #         iso_path=ISO_PATH,
-    #         ip_address=self._generate_static_ip(subnet="192.168.100"),
-    #         ip_subnet="192.168.100",
-    #     )
-
-    #     domain = await self.launch_domain(domain)
-    #     self.state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
-
-    #     try:
-    #         async with self.connection_context() as conn:
-    #             while True:
-    #                 try:
-    #                     is_domain_active(libvirt_connection=conn, name=domain.domain_name)
-    #                 except libvirt.libvirtError:
-    #                     self.logger.warning(f"Domain {domain.domain_name} is not active, retrying...")
-    #                 await asyncio.sleep(5)
-    #     finally:
-    #         await self.destroy_domain(domain)
+            # await asyncio.sleep(5)
 
     async def _run_jobs(self) -> None:
         await asyncio.gather(
@@ -310,7 +320,7 @@ class Server:
         await asyncio.gather(
             *(
                 self._destroy_domain_task(domain)
-                for domain in self.state["hypervisors"][self.hypervisor_url]["domains"].values()
+                for domain in self._state["hypervisors"][self.hypervisor_url]["domains"].values()
                 if domain.state not in (DomainState.TERMINATING, DomainState.LAUNCHING)
             ),
             self.destroy_nat_network("wso-net"),
@@ -329,4 +339,5 @@ class Server:
             sys.exit(1)
         finally:
             asyncio.run(self._cleanup())
+            self.write_state()
             self.logger.info(f"Server PID {os.getpid()} terminated")
