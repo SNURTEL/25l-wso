@@ -10,7 +10,7 @@ HAPROXY_TEMPLATE_FILE="$HAPROXY_CONFIG_DIR/haproxy.ctmpl"
 HAPROXY_OUTPUT_CONFIG_FILE="$HAPROXY_CONFIG_DIR/haproxy.cfg"
 HAPROXY_ERROR_PAGES_DIR="/etc/proxy-errors"
 
-LOCAL_IP="127.0.0.1"
+LOCAL_IP="192.168.1.130" #TODO
 
 if [ "$EUID" -ne 0 ]; then
   echo "Please run the script as root (sudo)."
@@ -110,7 +110,7 @@ backend webservers
     mode http
     balance roundrobin
     {{- range service "webserver" }}
-    server {{ .Node.Node }} {{ .Address }}:{{ .Port }} check
+    server {{ .ID }} {{ .Address }}:{{ .Port }} check
     {{- end }}
 
 listen stats
