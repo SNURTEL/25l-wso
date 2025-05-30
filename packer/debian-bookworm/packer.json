@@ -1,0 +1,57 @@
+{
+  "builders": [
+    {
+      "accelerator": "kvm",
+      "boot_command": [
+        "<esc><wait>",
+        "auto=true ",
+        "preseed/url=http://{{ .HTTPIP }}:{{ .HTTPPort }}/preseed.cfg ",
+        "debian-installer=en_US ",
+        "locale=en_US ",
+        "kbd-chooser/method=us ",
+        "hostname=debian ",
+        "fb=false ",
+        "debconf/frontend=noninteractive ",
+        "keyboard-configuration/modelcode=SKIP ",
+        "keyboard-configuration/layout=USA ",
+        "keyboard-configuration/variant=USA ",
+        "<enter>"
+      ],
+      "boot_wait": "10s",
+      "disk_image": true,
+      "disk_size": "4000M",
+      "format": "qcow2",
+      "headless": true,
+      "http_directory": "http",
+      "iso_checksum": "{{user `debian_iso_checksum`}}",
+      "iso_url": "{{user `debian_iso_url`}}",
+      "output_directory": "{{user `qemu_output_dir`}}",
+      "host_port_max": 2229,
+      "host_port_min": 2222,
+      "ssh_password": "debian",
+      "ssh_timeout": "30m",
+      "ssh_username": "debian",
+      "type": "qemu",
+      "vm_name": "{{user `qemu_output_name`}}",
+      "memory": 2048,
+      "cpus": 2,
+      "net_device": "virtio-net",
+      "disk_interface": "virtio"
+
+    }
+  ],
+  "provisioners": [
+    {
+      "inline": [
+        "echo 'Customizing Debian image...'"
+      ],
+      "type": "shell"
+    }
+  ],
+  "variables": {
+    "debian_iso_checksum": "sha256:30ca12a15cae6a1033e03ad59eb7f66a6d5a258dcf27acd115c2bd42d22640e8",
+    "debian_iso_url": "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-12.11.0-amd64-netinst.iso",
+    "qemu_output_dir": "qemu-images",
+    "qemu_output_name": "debian.qcow2"
+  }
+}

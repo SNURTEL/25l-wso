@@ -1,8 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run the script as root (sudo)."
+  exit 1
+fi
+
+which apt || { echo "This script is intended for Debian-based systems."; exit 1; }
 
 CONSUL_VERSION="1.16.2"
 CONSUL_TEMPLATE_VERSION="0.31.0"
-INSTALL_DIR="/usr/local/bin"
 CONSUL_CONFIG_DIR="/etc/consul.d"
 CONSUL_DATA_DIR="/opt/consul"
 HAPROXY_CONFIG_DIR="/etc/haproxy"
@@ -10,39 +18,47 @@ HAPROXY_TEMPLATE_FILE="$HAPROXY_CONFIG_DIR/haproxy.ctmpl"
 HAPROXY_OUTPUT_CONFIG_FILE="$HAPROXY_CONFIG_DIR/haproxy.cfg"
 HAPROXY_ERROR_PAGES_DIR="/etc/proxy-errors"
 
-LOCAL_IP="192.168.1.130" #TODO
+CONSUL_INSTALL_DIR="/usr/share/consul"
+CONSUL_TEMPLATE_INSTALL_DIR="/usr/share/consul-template"
+SYMLINK_DIR="/usr/local/bin"
 
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run the script as root (sudo)."
-  exit 1
-fi
+mkdir -p "$CONSUL_INSTALL_DIR"
+mkdir -p "$CONSUL_TEMPLATE_INSTALL_DIR"
+
+LOCAL_IP="127.0.0.1" #TODO
+
+export DEBIAN_FRONTEND=noninteractive
 
 echo "--- Starting Consul and Consul-Template Configuration ---"
 echo "1. Updating package list and installing unzip, curl, git..."
 apt update -y
-apt install -y unzip curl git systemd
+apt install -y unzip curl git
 
 echo "2. Installing Consul (development server)..."
 curl -fsSL https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip -o /tmp/consul.zip
-sudo unzip /tmp/consul.zip -d "${INSTALL_DIR}/"
-sudo chmod +x "${INSTALL_DIR}/consul"
+unzip /tmp/consul.zip -d "${CONSUL_INSTALL_DIR}/"
+chmod u+x "${CONSUL_INSTALL_DIR}/consul"
+ln -s "${CONSUL_INSTALL_DIR}/consul" "${SYMLINK_DIR}/consul"
+chmod u+x "${SYMLINK_DIR}/consul"
 rm /tmp/consul.zip
 echo "Consul version: $(consul --version)"
 
 echo "3. Installing Consul-Template..."
 curl -fsSL https://releases.hashicorp.com/consul-template/${CONSUL_TEMPLATE_VERSION}/consul-template_${CONSUL_TEMPLATE_VERSION}_linux_amd64.zip -o /tmp/consul-template.zip
-sudo unzip /tmp/consul-template.zip -d "${INSTALL_DIR}/"
-sudo chmod +x "${INSTALL_DIR}/consul-template"
+unzip /tmp/consul-template.zip -d "${CONSUL_TEMPLATE_INSTALL_DIR}/"
+chmod u+x "${CONSUL_TEMPLATE_INSTALL_DIR}/consul-template"
+ln -s "${CONSUL_TEMPLATE_INSTALL_DIR}/consul-template" "${SYMLINK_DIR}/consul-template"
+chmod u+x "${SYMLINK_DIR}/consul-template"
 rm /tmp/consul-template.zip
 echo "Consul-Template version: $(consul-template --version)"
 
 echo "4. Creating Consul configuration and data directories..."
-sudo mkdir -p "$CONSUL_CONFIG_DIR"
-sudo mkdir -p "$CONSUL_DATA_DIR"
-sudo chown -R ${USER:-$(whoami)}:$USER "$CONSUL_DATA_DIR"
+mkdir -p "$CONSUL_CONFIG_DIR"
+mkdir -p "$CONSUL_DATA_DIR"
+chown -R ${USER:-$(whoami)}:$USER "$CONSUL_DATA_DIR"
 
 echo "4.1. Creating configuration file for Consul Server..."
-cat <<EOF | sudo tee "$CONSUL_CONFIG_DIR/server.hcl"
+cat <<EOF | tee "$CONSUL_CONFIG_DIR/server.hcl"
 # server.hcl
 data_dir = "$CONSUL_DATA_DIR"
 server = true
@@ -53,7 +69,7 @@ ui = true # Enable the user interface
 EOF
 
 echo "4.2. Creating systemd unit for Consul Server..."
-cat <<EOF | sudo tee /etc/systemd/system/consul.service
+cat <<EOF | tee /etc/systemd/system/consul.service
 [Unit]
 Description="HashiCorp Consul - A service mesh solution"
 Documentation=https://www.consul.io/
@@ -61,8 +77,8 @@ Requires=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=${INSTALL_DIR}/consul agent -config-dir=${CONSUL_CONFIG_DIR}
-ExecReload=${INSTALL_DIR}/consul reload
+ExecStart=${SYMLINK_DIR}/consul agent -config-dir=${CONSUL_CONFIG_DIR}
+ExecReload=${SYMLINK_DIR}/consul reload
 KillMode=process
 Restart=on-failure
 LimitNOFILE=65536
@@ -72,17 +88,17 @@ WantedBy=multi-user.target
 EOF
 
 echo "5. Starting and enabling Consul Server..."
-sudo systemctl daemon-reload
-sudo systemctl start consul
-sudo systemctl enable consul
+systemctl daemon-reload
+systemctl start consul
+systemctl enable consul
 echo "Consul Server Status:"
 systemctl status consul --no-pager
 
 echo "6. Installing HAProxy..."
-sudo apt install haproxy -y
+apt install haproxy -y
 
 echo "6.3. Creating HAProxy template file ($HAPROXY_TEMPLATE_FILE)..."
-cat <<EOF | sudo tee "$HAPROXY_TEMPLATE_FILE"
+cat <<EOF | tee "$HAPROXY_TEMPLATE_FILE"
 global
     log /dev/log    local0 notice
     chroot /var/lib/haproxy
@@ -118,18 +134,18 @@ listen stats
     stats enable
     stats uri /haproxy_stats
     stats realm Haproxy\\ Statistics
-    stats auth admin:password # CHANGE THIS PASSWORD IN PRODUCTION!
+    stats auth admin:password
     stats refresh 10s
 EOF
 
 echo "7. Creating systemd unit for Consul-Template..."
-cat <<EOF | sudo tee /etc/systemd/system/consul-template.service
+cat <<EOF | tee /etc/systemd/system/consul-template.service
 [Unit]
 Description=Consul Template for HAProxy
 After=consul.service
 
 [Service]
-ExecStart=${INSTALL_DIR}/consul-template -template "${HAPROXY_TEMPLATE_FILE}:${HAPROXY_OUTPUT_CONFIG_FILE}:sudo systemctl reload haproxy" -consul-addr "${LOCAL_IP}:8500"
+ExecStart=${SYMLINK_DIR}/consul-template -template "${HAPROXY_TEMPLATE_FILE}:${HAPROXY_OUTPUT_CONFIG_FILE}:systemctl reload haproxy" -consul-addr "${LOCAL_IP}:8500"
 KillMode=process
 Restart=on-failure
 
@@ -138,11 +154,11 @@ WantedBy=multi-user.target
 EOF
 
 echo "7.1. Starting and enabling Consul-Template..."
-sudo systemctl daemon-reload
-sudo systemctl start haproxy
-sudo systemctl enable haproxy
-sudo systemctl start consul-template
-sudo systemctl enable consul-template
+systemctl daemon-reload
+systemctl start haproxy
+systemctl enable haproxy
+systemctl start consul-template
+systemctl enable consul-template
 echo "Consul-Template Status:"
 systemctl status consul-template --no-pager
 

@@ -14,9 +14,11 @@ def _get_domain_xml(
     n_cpus: int,
     memory_kib: int,
     network_name: str,
-    iso_path: str | os.PathLike,
+    image_path: str | os.PathLike,
     cloud_init_iso_path: str | os.PathLike,
 ) -> str:
+    image_type = "qcow2" if str(image_path).endswith(".qcow2") else "raw"
+
     domain_xml = f"""
   <domain type='kvm'>
     <name>{name}</name>
@@ -35,8 +37,8 @@ def _get_domain_xml(
     <devices>
       <emulator>{QEMU_BINARY_PATH.resolve().absolute()}</emulator>
       <disk type='file' device='cdrom'>
-        <driver name='qemu' type='raw'/>
-        <source file='{iso_path}'/>
+        <driver name='qemu' type='{image_type}'/>
+        <source file='{image_path}'/>
         <target dev='hdc' bus='ide'/>
         <readonly/>
       </disk>
@@ -123,7 +125,7 @@ async def launch_domain(
     n_cpus: int,
     memory_kib: int,
     network_name: str,
-    iso_path: str | os.PathLike,
+    image_path: str | os.PathLike,
     static_ip: str,
 ) -> libvirt.virDomain:
     await create_disk_image(name)
@@ -135,7 +137,7 @@ async def launch_domain(
         n_cpus=n_cpus,
         memory_kib=memory_kib,
         network_name=network_name,
-        iso_path=str(iso_path),
+        image_path=str(image_path),
         cloud_init_iso_path=cloud_init_iso_path,
     )
     dom = await asyncio.to_thread(partial(libvirt_connection.createXML, xmlDesc=domain_xml))
@@ -203,15 +205,9 @@ write_files:
             listen 80 default_server;
             listen [::]:80 default_server;
 
-            # Everything is a 404
             location / {{
                 root   html;
                 index  index.html;
-            }}
-
-            # You may need this to prevent return 404 recursion.
-            location = /404.html {{
-                    internal;
             }}
         }}
     permissions: '0644'
@@ -242,15 +238,14 @@ runcmd:
   - ifdown eth0 || true
   - ifup eth0
   - echo "Network configured: {static_ip}"
-  - setup-apkrepos -1
-  - apk update
-  - apk add nginx
-  - service nginx start
+  - systemctl enable nginx
+  - systemctl start nginx
   - mv /tmp/index.html /var/lib/nginx/html/index.html
 
 # Ensure network service is enabled
 packages:
   - ifupdown
+  - nginx
 
 final_message: "Cloud-init configuration completed for {domain_name}"
 """

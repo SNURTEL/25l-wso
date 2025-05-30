@@ -52,7 +52,7 @@ class Domain:
     state: DomainState
     n_cpus: int
     memory_kib: int
-    iso_path: Path
+    image_path: Path
     network_name: str
     bridge_name: str
     ip_address: str
@@ -61,7 +61,7 @@ class Domain:
     n_failed_healthchecks: int
     started_at: datetime.datetime | None
 
-    def __init__(self, n_cpus: int, memory_kib: int, iso_path: Path, ip_address: str, ip_subnet: str):
+    def __init__(self, n_cpus: int, memory_kib: int, image_path: Path, ip_address: str, ip_subnet: str):
         self.domain_id = str(uuid4())[:8]
 
         self.domain_name = f"wso-{self.domain_id}"
@@ -75,7 +75,7 @@ class Domain:
 
         self.n_cpus = n_cpus
         self.memory_kib = memory_kib
-        self.iso_path = iso_path.resolve().absolute()
+        self.image_path = image_path.resolve().absolute()
         self.ip_address = ip_address
         self.ip_subnet = ip_subnet
 
@@ -170,7 +170,7 @@ class Server:
                 n_cpus=domain.n_cpus,
                 memory_kib=domain.memory_kib,
                 network_name=domain.network_name,
-                iso_path=domain.iso_path,
+                image_path=domain.image_path,
                 static_ip=domain.ip_address,
             )
             self.logger.info(f"Launched domain {domain.domain_name} with static IP {domain.ip_address}")
@@ -302,7 +302,7 @@ class Server:
                     domain = Domain(
                         n_cpus=1,
                         memory_kib=1024 * 1024,
-                        iso_path=config.ISO_PATH,
+                        image_path=config.IMAGE_PATH,
                         ip_address=self._generate_static_ip(subnet="192.168.100"),
                         ip_subnet="192.168.100",
                     )
