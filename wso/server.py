@@ -274,7 +274,7 @@ class Server:
             raise e
 
     async def respond_to_state_change(self) -> None:
-        N_VMS = 2
+        N_VMS = 1
 
         while True:
             await self._state_changed.wait()

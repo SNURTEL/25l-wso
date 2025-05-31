@@ -102,3 +102,20 @@ pre-commit install
 ```
 
 https://libvirt-python.readthedocs.io/
+
+
+## Build packer
+
+Start build, connect over vnc, install grub to /dev/vda
+
+Run the final image:
+
+```shell
+qemu-system-x86_64 \
+    -drive file=debian.qcow2,if=virtio,cache=writeback,discard=ignore,format=qcow2 \
+    -machine type=pc,accel=kvm  \
+    -m 4096M \
+    -smp 4 \
+    -device virtio-net,netdev=user.0  \
+    -netdev user,id=user.0,hostfwd=tcp::4141-:22
+```

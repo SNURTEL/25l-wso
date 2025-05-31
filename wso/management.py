@@ -19,6 +19,53 @@ def _get_domain_xml(
 ) -> str:
     image_type = "qcow2" if str(image_path).endswith(".qcow2") else "raw"
 
+    # <domain type='kvm'>
+    #   <name>{name}</name>
+    #   <memory>{memory_kib}</memory>
+    #   <vcpu>{n_cpus}</vcpu>
+    #   <os>
+    #     <type arch="x86_64">hvm</type>
+    #     <boot dev='cdrom'/>
+    #     <boot dev='hd'/>
+    #   </os>
+    #   <features>
+    #     <acpi/>
+    #     <apic/>
+    #   </features>
+    #   <clock sync="localtime"/>
+    #   <devices>
+    #     <emulator>{QEMU_BINARY_PATH.resolve().absolute()}</emulator>
+    #     <disk type='file' device='cdrom'>
+    #       <driver name='qemu' type='{image_type}'/>
+    #       <source file='{image_path}'/>
+    #       <target dev='hdc' bus='ide'/>
+    #       <readonly/>
+    #     </disk>
+    #     <disk type='file' device='cdrom'>
+    #       <driver name='qemu' type='raw'/>
+    #       <source file='{cloud_init_iso_path}'/>
+    #       <target dev='hdd' bus='ide'/>
+    #       <readonly/>
+    #     </disk>
+    #     <disk type='file' device='disk'>
+    #       <driver name='qemu' type='qcow2'/>
+    #       <source file='{WORKDIR.resolve().absolute()}/wso-{name}-disk.qcow2'/>
+    #       <target dev='vda' bus='virtio'/>
+    #     </disk>
+    #     <interface type='network'>
+    #       <source network='{network_name}'/>
+    #       <model type='virtio'/>
+    #     </interface>
+    #     <graphics type='vnc' port='-1' listen='127.0.0.1'/>
+    #     <serial type='pty'>
+    #       <target port='0'/>
+    #     </serial>
+    #     <console type='pty'>
+    #       <target type='serial' port='0'/>
+    #     </console>
+    #   </devices>
+    # </domain>
+
     domain_xml = f"""
   <domain type='kvm'>
     <name>{name}</name>
@@ -26,8 +73,8 @@ def _get_domain_xml(
     <vcpu>{n_cpus}</vcpu>
     <os>
       <type arch="x86_64">hvm</type>
-      <boot dev='cdrom'/>
       <boot dev='hd'/>
+      <boot dev='cdrom'/>
     </os>
     <features>
       <acpi/>
@@ -36,34 +83,27 @@ def _get_domain_xml(
     <clock sync="localtime"/>
     <devices>
       <emulator>{QEMU_BINARY_PATH.resolve().absolute()}</emulator>
-      <disk type='file' device='cdrom'>
+      <disk type='file' device='disk'>
         <driver name='qemu' type='{image_type}'/>
         <source file='{image_path}'/>
-        <target dev='hdc' bus='ide'/>
-        <readonly/>
+        <target dev='vda' bus='virtio'/>
       </disk>
       <disk type='file' device='cdrom'>
         <driver name='qemu' type='raw'/>
         <source file='{cloud_init_iso_path}'/>
-        <target dev='hdd' bus='ide'/>
+        <target dev='hdb' bus='ide'/>
         <readonly/>
-      </disk>
-      <disk type='file' device='disk'>
-        <driver name='qemu' type='qcow2'/>
-        <source file='{WORKDIR.resolve().absolute()}/wso-{name}-disk.qcow2'/>
-        <target dev='vda' bus='virtio'/>
+        <serial>{name}-cloud-init</serial>
       </disk>
       <interface type='network'>
         <source network='{network_name}'/>
         <model type='virtio'/>
+        <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
       </interface>
-      <graphics type='vnc' port='-1' listen='127.0.0.1'/>
-      <serial type='pty'>
-        <target port='0'/>
-      </serial>
       <console type='pty'>
         <target type='serial' port='0'/>
       </console>
+      <graphics type='vnc' port='-1' listen='127.0.0.1'/>
     </devices>
   </domain>
   """
@@ -80,16 +120,17 @@ def _get_network_xml(name: str, bridge_name: str, subnet: str = "192.168.100") -
             </nat>
         </forward>
         <bridge name="{bridge_name}" stp="on" delay="0"/>
-        <ip address="{subnet}.1" netmask="255.255.255.0"/>
+        <ip address="{subnet}.1" netmask="255.255.255.0">
+        </ip>
     </network>
     """
     return network_xml
 
 
-async def create_disk_image(domain_name: str, size_gb: int = 1) -> Path:
+async def create_disk_image(domain_name: str, image_path: str, size_gb: int = 1) -> Path:
     """Create a qcow2 disk image for the VM"""
     disk_path = WORKDIR / f"wso-{domain_name}-disk.qcow2"
-    cmd = f"qemu-img create -f qcow2 {disk_path} {size_gb}G"
+    cmd = f"cp {image_path} {disk_path}"
     process = await asyncio.create_subprocess_shell(cmd)
     await process.wait()
     return disk_path
@@ -128,7 +169,8 @@ async def launch_domain(
     image_path: str | os.PathLike,
     static_ip: str,
 ) -> libvirt.virDomain:
-    await create_disk_image(name)
+    # Create a copy of the base image for this VM
+    disk_path = await create_disk_image(name, image_path=str(image_path))
 
     cloud_init_iso_path = await create_cloud_init_iso(name, static_ip)
 
@@ -137,7 +179,7 @@ async def launch_domain(
         n_cpus=n_cpus,
         memory_kib=memory_kib,
         network_name=network_name,
-        image_path=str(image_path),
+        image_path=str(disk_path),  # Use the copied disk image
         cloud_init_iso_path=cloud_init_iso_path,
     )
     dom = await asyncio.to_thread(partial(libvirt_connection.createXML, xmlDesc=domain_xml))
@@ -174,13 +216,21 @@ async def create_cloud_init_iso(domain_name: str, static_ip: str, gateway: str =
 local-hostname: {domain_name}
 """
 
-        # Create user-data file with network configuration
+        # Create user-data file with robust network configuration
         user_data = f"""#cloud-config
 hostname: {domain_name}
 manage_etc_hosts: true
 
-# Network configuration
+# Install necessary packages
+package_update: true
+packages:
+  - nginx
+  - net-tools
+  - ifupdown
+
+# Direct network configuration using write_files
 write_files:
+  # Traditional Debian interfaces configuration
   - path: /etc/network/interfaces
     content: |
       auto lo
@@ -191,63 +241,68 @@ write_files:
           address {static_ip}
           netmask 255.255.255.0
           gateway {gateway}
+          dns-nameservers 8.8.8.8 8.8.4.4
     permissions: '0644'
 
+  # Systemd-networkd configuration as backup
+  - path: /etc/systemd/network/eth0.network
+    content: |
+      [Match]
+      Name=eth0
+
+      [Network]
+      Address={static_ip}/24
+      Gateway={gateway}
+      DNS=8.8.8.8
+      DNS=8.8.4.4
+    permissions: '0644'
+
+  # DNS configuration
   - path: /etc/resolv.conf
     content: |
       nameserver 8.8.8.8
       nameserver 8.8.4.4
     permissions: '0644'
 
-  - path: /etc/nginx/http.d/default.conf
+  # Nginx default site
+  - path: /var/www/html/index.html
     content: |
-        server {{
-            listen 80 default_server;
-            listen [::]:80 default_server;
-
-            location / {{
-                root   html;
-                index  index.html;
-            }}
-        }}
+      <!DOCTYPE html>
+      <html>
+      <head>
+          <title>Hello from {domain_name}</title>
+      </head>
+      <body>
+          <h1>Hello from {domain_name}!</h1>
+          <p>IP: {static_ip}</p>
+          <p>Gateway: {gateway}</p>
+      </body>
+      </html>
     permissions: '0644'
 
-  - path: /tmp/index.html
+  # Network setup script
+  - path: /usr/local/bin/configure-network.sh
     content: |
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Hello from {domain_name}</title>
-            <style>
-            html {{ color-scheme: light dark; }}
-            body {{ width: 35em; margin: 0 auto;
-            font-family: Tahoma, Verdana, Arial, sans-serif; }}
-            </style>
-        </head>
-        <body>
-            <h1>Hello from {domain_name}!</h1>
-            <p>Nginx running on {domain_name}, {static_ip} </p>
-        </body>
-        </html>
-    permissions: '0644'
+      #!/bin/bash
+      echo "Configuring network for {static_ip}..."
+      ip addr add {static_ip}/24 dev eth0 || true
+      ip link set eth0 up || true
+      ip route add default via {gateway} || true
+      echo "nameserver 8.8.8.8" > /etc/resolv.conf
+      echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+      systemctl enable nginx
+      systemctl start nginx
+      echo "Network configured successfully"
+    permissions: '0755'
 
-# Run commands to apply network configuration
+# Commands to execute
 runcmd:
+  - bash /usr/local/bin/configure-network.sh
   - ifdown eth0 || true
-  - ifup eth0
-  - echo "Network configured: {static_ip}"
-  - systemctl enable nginx
-  - systemctl start nginx
-  - mv /tmp/index.html /var/lib/nginx/html/index.html
+  - ifup eth0 || true
+  - systemctl restart networking || true
 
-# Ensure network service is enabled
-packages:
-  - ifupdown
-  - nginx
-
-final_message: "Cloud-init configuration completed for {domain_name}"
+final_message: "Cloud-init completed for {domain_name}"
 """
 
         meta_data_path = os.path.join(temp_dir, "meta-data")
@@ -268,6 +323,8 @@ final_message: "Cloud-init configuration completed for {domain_name}"
             "cidata",
             "-joliet",
             "-rock",
+            "-input-charset",
+            "utf-8",
             meta_data_path,
             user_data_path,
         ]

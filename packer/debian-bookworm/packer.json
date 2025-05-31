@@ -4,21 +4,23 @@
       "accelerator": "kvm",
       "boot_command": [
         "<esc><wait>",
+        "install ",
         "auto=true ",
+        "priority=critical ",
         "preseed/url=http://{{ .HTTPIP }}:{{ .HTTPPort }}/preseed.cfg ",
-        "debian-installer=en_US ",
-        "locale=en_US ",
+        "debian-installer=en_US.UTF-8 ",
+        "locale=en_US.UTF-8 ",
         "kbd-chooser/method=us ",
-        "hostname=debian ",
+        "netcfg/get_hostname=debian ",
+        "netcfg/get_domain=localdomain ",
         "fb=false ",
         "debconf/frontend=noninteractive ",
-        "keyboard-configuration/modelcode=SKIP ",
-        "keyboard-configuration/layout=USA ",
-        "keyboard-configuration/variant=USA ",
-        "<enter>"
+        "console-setup/ask_detect=false ",
+        "console-keymaps-at/keymap=us ",
+        "keyboard-configuration/xkb-keymap=us ",
+        "<enter><wait>"
       ],
-      "boot_wait": "10s",
-      "disk_image": true,
+      "boot_wait": "15s",
       "disk_size": "4000M",
       "format": "qcow2",
       "headless": true,
@@ -29,8 +31,11 @@
       "host_port_max": 2229,
       "host_port_min": 2222,
       "ssh_password": "debian",
-      "ssh_timeout": "30m",
+      "ssh_timeout": "45m",
       "ssh_username": "debian",
+      "ssh_wait_timeout": "45m",
+      "ssh_handshake_attempts": 10,
+      "ssh_pty": true,
       "type": "qemu",
       "vm_name": "{{user `qemu_output_name`}}",
       "memory": 2048,
@@ -43,7 +48,7 @@
   "provisioners": [
     {
       "inline": [
-        "echo 'Customizing Debian image...'"
+        "sudo apt update && sudo apt install nginx -y && sudo systemctl enable serial-getty@ttyS0.service && sudo systemctl start serial-getty@ttyS0.service"
       ],
       "type": "shell"
     }
