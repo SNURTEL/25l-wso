@@ -198,40 +198,6 @@ write_files:
       nameserver 8.8.4.4
     permissions: '0644'
 
-  - path: /etc/nginx/http.d/default.conf
-    content: |
-        server {{
-            listen 80 default_server;
-            listen [::]:80 default_server;
-
-            location / {{
-                root   html;
-                index  index.html;
-            }}
-        }}
-    permissions: '0644'
-
-  - path: /tmp/index.html
-    content: |
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Hello from {domain_name}</title>
-            <style>
-            html {{ color-scheme: light dark; }}
-            body {{ width: 35em; margin: 0 auto;
-            font-family: Tahoma, Verdana, Arial, sans-serif; }}
-            </style>
-        </head>
-        <body>
-            <h1>Hello from {domain_name}!</h1>
-            <p>Nginx running on {domain_name}, {static_ip} </p>
-        </body>
-        </html>
-    permissions: '0644'
-
 runcmd:
   - hostname {domain_name}
   - ifdown eth0 || true
@@ -283,7 +249,7 @@ async def configure_domain(
     config_script_file: str | os.PathLike = VM_SETUP_SCRIPT_PATH,
 ) -> None:
     proc = await asyncio.create_subprocess_shell(
-        f"scp -oStrictHostKeyChecking=no -i {SSH_KEY_PATH} {config_script_file} {user}@{ip}:/setup.sh",
+        f"scp -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o UserKnownHostsFile=/dev/null -o 'BatchMode=yes' -i {SSH_KEY_PATH} {config_script_file} {user}@{ip}:/setup.sh",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -291,7 +257,7 @@ async def configure_domain(
     if proc.returncode != 0:
         raise RuntimeError(f"Failed to copy setup script to {ip}: {stderr.decode().strip()}")
     proc = await asyncio.create_subprocess_shell(
-        f"ssh -t -i {SSH_KEY_PATH} {user}@{ip} 'sh /setup.sh > tee /setup.log'",
+        f"ssh -t -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o UserKnownHostsFile=/dev/null -o 'BatchMode=yes' -i {SSH_KEY_PATH} {user}@{ip} 'sh /setup.sh > tee /setup.log'",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

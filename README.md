@@ -90,6 +90,22 @@ service flask_app stop
 
 In a few seconds you should see warnings about failing healthchecks in logs and then the VM should be destroyed and a new one should be created in place.
 
+## Talk to the daemon
+
+```shell
+# start the daemon
+pdm run python3 -m wso start
+
+# stop the daemon
+pdm run python3 -m wso stop
+
+# scale to N VMs
+pdm run python3 -m wso scale <N>
+
+# get current state
+pdm run python3 -m wso state
+```
+
 ## Stop the daemon
 
 Using pidfile

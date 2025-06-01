@@ -6,6 +6,7 @@ import datetime
 import enum
 import errno
 import functools
+import json
 import logging
 import os
 import random
@@ -26,7 +27,7 @@ from wso.management import (
     get_or_create_nat_network,
     launch_domain,
 )
-from wso.utils import get_logger
+from wso.utils import EnhancedJSONEncoder, get_logger
 
 
 class ServerState(TypedDict):
@@ -89,6 +90,8 @@ class Server:
 
     _healthcheck_tasks: dict[str, asyncio.Task[None]] = {}
 
+    _desired_num_vms = 2
+
     def __init__(self, workdir: Path, hypervisor_url: str):
         assert not (workdir.exists() and workdir.is_file()), f"Workdir {workdir} already exists and is a file"
         self.workdir = workdir
@@ -106,6 +109,48 @@ class Server:
         )
 
         self._state_changed.set()
+
+    async def handle_msg(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        data = await reader.read(1024)
+        message = data.decode()
+
+        self.logger.debug(f"Received msg {message!r}")
+
+        if message.strip() == "state":
+            response = json.dumps(self._state, cls=EnhancedJSONEncoder)
+            writer.write("OK\n".encode())
+            writer.write(response.encode())
+        elif message.startswith("scale "):
+            n_vms_str = message.split()[1]
+            if not n_vms_str.isnumeric() or not (1 <= int(n_vms_str) <= 100):
+                response = "Expected integer <1,100>"
+                writer.write("ERROR\n".encode())
+                writer.write(response.encode())
+            else:
+                self._desired_num_vms = int(n_vms_str)
+                response = f"Scale to {self._desired_num_vms}"
+                writer.write("OK\n".encode())
+                writer.write(response.encode())
+                self._state_changed.set()
+        else:
+            self.logger.warning(f"Unknown message received: {message!r}")
+            response = f"Unknown command: {message!r}"
+            writer.write("ERROR\n".encode())
+            writer.write(response.encode())
+
+        await writer.drain()
+
+        writer.close()
+        await writer.wait_closed()
+
+    async def run_server(self) -> None:
+        server = await asyncio.start_server(self.handle_msg, config.SERVER_HOST, config.SERVER_PORT)
+
+        addrs = ", ".join(str(sock.getsockname()) for sock in server.sockets)
+        self.logger.debug(f"Serving on TCP {addrs}")
+
+        async with server:
+            await server.serve_forever()
 
     @property
     @functools.lru_cache
@@ -142,27 +187,28 @@ class Server:
         ip_suffix = random.randint(2, 254)
         return f"{subnet}.{ip_suffix}"
 
-    async def _configure_domain_task(
-        self, domain: Domain, retries: int = 5, retry_interval_s: int = 3, initial_delay_s: int = 15
-    ) -> None:
+    async def _configure_domain_task(self, domain: Domain) -> None:
         try:
-            self.logger.debug(f"Waiting {initial_delay_s}s for {domain.domain_name} to boot before configuring...")
-            await asyncio.sleep(initial_delay_s)
+            self.logger.debug(
+                f"Waiting {config.CONFIGURATION_INITIAL_DELAY}s for {domain.domain_name} to boot before attempting configuring..."
+            )
+            await asyncio.sleep(config.CONFIGURATION_INITIAL_DELAY)
             self.logger.debug(f"Configuring domain {domain.domain_name} with static IP {domain.ip_address}...")
 
-            for _ in range(retries):
+            for _ in range(config.CONFIGURATION_RETRIES):
                 try:
                     await configure_domain(ip=domain.ip_address)
                     break
                 except Exception as e:
                     self.logger.error(f"Configuration failed for domain {domain.domain_name}: {e}")
-                    self.logger.exception(e)
-                    await asyncio.sleep(retry_interval_s)
+                    await asyncio.sleep(config.CONFIGURATION_RETRY_INTERVAL)
             else:
                 domain.state = DomainState.UNHEALTHY
                 self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
                 self._state_changed.set()
-                raise RuntimeError(f"Failed to configure domain {domain.domain_name} after {retries} retries")
+                raise RuntimeError(
+                    f"Failed to configure domain {domain.domain_name} after {config.CONFIGURATION_RETRIES} retries"
+                )
             self.logger.info(f"Configured domain {domain.domain_name} with static IP {domain.ip_address}")
         except Exception as e:
             self.logger.error(f"Failed to configure domain {domain.domain_name}: {e}")
@@ -291,8 +337,6 @@ class Server:
             raise e
 
     async def respond_to_state_change(self) -> None:
-        N_VMS = 2
-
         while True:
             await self._state_changed.wait()
 
@@ -310,12 +354,17 @@ class Server:
                 for domain in self._state["hypervisors"][self.hypervisor_url]["domains"].values()
                 if domain.state in (DomainState.LAUNCHING, DomainState.HEALTHY, DomainState.HEALTHCHECK_INITIALIZING)
             ]
+            healthy_domains = [
+                domain
+                for domain in self._state["hypervisors"][self.hypervisor_url]["domains"].values()
+                if domain.state == DomainState.HEALTHY
+            ]
 
-            if len(running_domains) < N_VMS:
+            if len(running_domains) < self._desired_num_vms:
                 self.logger.info(
-                    f"{len(running_domains)} domains running, launching {N_VMS - len(running_domains)} more..."
+                    f"{len(running_domains)} domains running, {self._desired_num_vms} expected, launching {self._desired_num_vms - len(running_domains)} more..."
                 )
-                for _ in range(N_VMS - len(running_domains)):
+                for _ in range(self._desired_num_vms - len(running_domains)):
                     domain = Domain(
                         n_cpus=1,
                         memory_kib=1024 * 1024,
@@ -324,12 +373,21 @@ class Server:
                         ip_subnet="192.168.100",
                     )
                     asyncio.create_task(self._start_domain_task(domain), name=f"launch {domain.domain_name}")
+            elif len(healthy_domains) > self._desired_num_vms:
+                n_destroy = len(healthy_domains) - self._desired_num_vms
+                self.logger.info(
+                    f"{len(healthy_domains)} healthy domains running, {self._desired_num_vms} expected, destroying {n_destroy} excess..."
+                )
+                picks = random.sample(healthy_domains, n_destroy)
+                for domain in picks:
+                    asyncio.create_task(self._destroy_domain_task(domain), name=f"destroy {domain.domain_name}")
 
             self._state_changed.clear()
 
     async def _run_jobs(self) -> None:
         await asyncio.gather(
             self.respond_to_state_change(),
+            self.run_server(),
         )
 
     async def _cleanup(self) -> None:
