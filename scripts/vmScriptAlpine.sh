@@ -28,7 +28,6 @@ mkdir -p "/var/log/consul-template-vm"
 echo "--- Rozpoczynanie konfiguracji VM (Flask App i Consul Agent) - Alpine Linux ---"
 
 echo "1. Aktualizacja indeksu pakietów i instalacja podstawowych pakietów..."
-setup-apkrepos -c -1
 apk update
 apk add --no-cache curl unzip git python3 py3-pip python3-dev py3-virtualenv openrc
 

@@ -6,7 +6,6 @@ import datetime
 import enum
 import errno
 import functools
-import json
 import logging
 import os
 import random
@@ -21,12 +20,13 @@ import libvirt
 
 import wso.config as config
 from wso.management import (
+    configure_domain,
     destroy_domain,
     destroy_nat_network,
     get_or_create_nat_network,
     launch_domain,
 )
-from wso.utils import EnhancedJSONEncoder, get_logger
+from wso.utils import get_logger
 
 
 class ServerState(TypedDict):
@@ -93,31 +93,19 @@ class Server:
         assert not (workdir.exists() and workdir.is_file()), f"Workdir {workdir} already exists and is a file"
         self.workdir = workdir
         self.hypervisor_url = hypervisor_url
-        self.state_file = workdir / "state.json"
 
         if not self.workdir.exists():
             self.workdir.mkdir(parents=True, exist_ok=True)
 
-        if not self.state_file.exists():
-            self._state = ServerState(
-                hypervisors={
-                    self.hypervisor_url: HypervisorState(
-                        domains={},
-                    ),
-                },
-            )
-        else:
-            with self.state_file.open("r") as f:
-                # TODO replace with shelve
-                self._state: ServerState = json.load(f)
+        self._state = ServerState(
+            hypervisors={
+                self.hypervisor_url: HypervisorState(
+                    domains={},
+                ),
+            },
+        )
 
         self._state_changed.set()
-
-    def write_state(self) -> None:
-        # honestly this is not critical, we can simply write state at program exit
-        with self.state_file.open("w") as f:
-            self.logger.debug(f"Saving state to {self.state_file}...")
-            json.dump(self._state, f, indent=2, cls=EnhancedJSONEncoder)
 
     @property
     @functools.lru_cache
@@ -149,9 +137,37 @@ class Server:
             raise HealthCheckFailureException(exception_msg) from e
         writer.close()
 
+    # todo this is wrong
     def _generate_static_ip(self, subnet: str = "192.168.100") -> str:
         ip_suffix = random.randint(2, 254)
         return f"{subnet}.{ip_suffix}"
+
+    async def _configure_domain_task(
+        self, domain: Domain, retries: int = 5, retry_interval_s: int = 3, initial_delay_s: int = 15
+    ) -> None:
+        try:
+            self.logger.debug(f"Waiting {initial_delay_s}s for {domain.domain_name} to boot before configuring...")
+            await asyncio.sleep(initial_delay_s)
+            self.logger.debug(f"Configuring domain {domain.domain_name} with static IP {domain.ip_address}...")
+
+            for _ in range(retries):
+                try:
+                    await configure_domain(ip=domain.ip_address)
+                    break
+                except Exception as e:
+                    self.logger.error(f"Configuration failed for domain {domain.domain_name}: {e}")
+                    self.logger.exception(e)
+                    await asyncio.sleep(retry_interval_s)
+            else:
+                domain.state = DomainState.UNHEALTHY
+                self._state["hypervisors"][self.hypervisor_url]["domains"][domain.domain_name] = domain
+                self._state_changed.set()
+                raise RuntimeError(f"Failed to configure domain {domain.domain_name} after {retries} retries")
+            self.logger.info(f"Configured domain {domain.domain_name} with static IP {domain.ip_address}")
+        except Exception as e:
+            self.logger.error(f"Failed to configure domain {domain.domain_name}: {e}")
+            self.logger.exception(e)
+            raise e
 
     async def launch_domain(self, domain: Domain) -> Domain:
         async with self.connection_context() as conn:
@@ -174,6 +190,7 @@ class Server:
                 static_ip=domain.ip_address,
             )
             self.logger.info(f"Launched domain {domain.domain_name} with static IP {domain.ip_address}")
+            asyncio.create_task(self._configure_domain_task(domain=domain))
 
             domain.state = DomainState.HEALTHCHECK_INITIALIZING
             domain.started_at = datetime.datetime.now()
@@ -206,12 +223,12 @@ class Server:
 
     async def _healthcheck_task(self, domain: Domain) -> None:
         self.logger.debug(
-            f"Waiting {config.HEALTHCHECK_START_DELAY} before starting healthcheck for domain {domain.domain_name}"
+            f"Waiting {config.HEALTHCHECK_START_DELAY}s before starting healthcheck for domain {domain.domain_name}"
         )
         await asyncio.sleep(config.HEALTHCHECK_START_DELAY)
         while True:
             try:
-                await self.healthckeck_single(domain.ip_address, 80)
+                await self.healthckeck_single(domain.ip_address, config.HEALTHCHECK_PORT)
                 healthy = True
             except HealthCheckFailureException as e:
                 self.logger.warning(f"Healthcheck failed for domain {domain.domain_name}: {e}")
@@ -309,7 +326,6 @@ class Server:
                     asyncio.create_task(self._start_domain_task(domain), name=f"launch {domain.domain_name}")
 
             self._state_changed.clear()
-            # await asyncio.sleep(5)
 
     async def _run_jobs(self) -> None:
         await asyncio.gather(
@@ -339,5 +355,4 @@ class Server:
             sys.exit(1)
         finally:
             asyncio.run(self._cleanup())
-            self.write_state()
             self.logger.info(f"Server PID {os.getpid()} terminated")

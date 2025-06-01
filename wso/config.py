@@ -10,10 +10,13 @@ ISO_PATH = Path(os.getenv("ISO_PATH", ""))
 assert ISO_PATH.is_file(), f"ISO_PATH {ISO_PATH} does not exist or is not a file."
 QEMU_BINARY_PATH = Path(os.getenv("QEMU_BINARY_PATH", "/usr/bin/qemu-system-x86_64"))
 assert QEMU_BINARY_PATH.is_file(), f"QEMU_BINARY_PATH {QEMU_BINARY_PATH} does not exist or is not a file."
-PHYSICAL_IFACE_NAME = os.getenv("PHYSICAL_IFACE_NAME", "wlp3s0")
+PHYSICAL_IFACE_NAME = os.getenv("PHYSICAL_IFACE_NAME", "eth0")
 WORKDIR = Path(os.getenv("WORKDIR", "/tmp/wso-scaler"))
 WORKDIR.mkdir(parents=True, exist_ok=True)
+VM_SETUP_SCRIPT_PATH = os.getenv("VM_SETUP_SCRIPT_PATH", "NOTSET")
+SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", None)
 
+HEALTHCHECK_PORT = int(os.getenv("HEALTHCHECK_PORT", "5000"))
 HEALTHCHECK_START_DELAY = int(os.getenv("HEALTHCHECK_START_DELAY", "45"))
 HEALTHCHECK_INTERVAL = int(os.getenv("HEALTHCHECK_INTERVAL", "5"))
 HEALTHCHECK_HEALTHY_THRESHOLD = int(os.getenv("HEALTHCHECK_HEALTHY_THRESHOLD", "3"))

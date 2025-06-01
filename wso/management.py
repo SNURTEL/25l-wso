@@ -6,7 +6,8 @@ from pathlib import Path
 
 import libvirt
 
-from wso.config import QEMU_BINARY_PATH, WORKDIR
+from wso.config import QEMU_BINARY_PATH, SSH_KEY_PATH, VM_SETUP_SCRIPT_PATH, WORKDIR
+from wso.utils import get_ssh_public_key
 
 
 def _get_domain_xml(
@@ -203,15 +204,9 @@ write_files:
             listen 80 default_server;
             listen [::]:80 default_server;
 
-            # Everything is a 404
             location / {{
                 root   html;
                 index  index.html;
-            }}
-
-            # You may need this to prevent return 404 recursion.
-            location = /404.html {{
-                    internal;
             }}
         }}
     permissions: '0644'
@@ -237,20 +232,16 @@ write_files:
         </html>
     permissions: '0644'
 
-# Run commands to apply network configuration
 runcmd:
+  - hostname {domain_name}
   - ifdown eth0 || true
   - ifup eth0
-  - echo "Network configured: {static_ip}"
-  - setup-apkrepos -1
+  - setup-apkrepos -c -1
   - apk update
-  - apk add nginx
-  - service nginx start
   - mv /tmp/index.html /var/lib/nginx/html/index.html
-
-# Ensure network service is enabled
-packages:
-  - ifupdown
+  - ssh-keygen -t ed25519 -q -f "/root/.ssh/id_ed25519" -N ""
+  - echo "{get_ssh_public_key()}" >> /root/.ssh/authorized_keys
+  - touch /initialized
 
 final_message: "Cloud-init configuration completed for {domain_name}"
 """
@@ -284,3 +275,26 @@ final_message: "Cloud-init configuration completed for {domain_name}"
             raise RuntimeError(f"Failed to create cloud-init ISO: {process.returncode}")
 
         return Path(iso_path)
+
+
+async def configure_domain(
+    ip: str,
+    user: str = "root",
+    config_script_file: str | os.PathLike = VM_SETUP_SCRIPT_PATH,
+) -> None:
+    proc = await asyncio.create_subprocess_shell(
+        f"scp -oStrictHostKeyChecking=no -i {SSH_KEY_PATH} {config_script_file} {user}@{ip}:/setup.sh",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Failed to copy setup script to {ip}: {stderr.decode().strip()}")
+    proc = await asyncio.create_subprocess_shell(
+        f"ssh -t -i {SSH_KEY_PATH} {user}@{ip} 'sh /setup.sh > tee /setup.log'",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Failed to run setup script on {ip}: {stderr.decode().strip()}")

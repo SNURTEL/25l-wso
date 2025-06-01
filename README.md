@@ -30,7 +30,7 @@ pdm install
 
 Download [Alpine Linux ISO](https://alpinelinux.org/downloads/) and enter its path to `.env` (tested with alpine-standard-3.21.3-x86_64.iso).
 
-Also check whether QEMU path and iface name in `.env` match you configuration and adjust if needed.
+Also check whether QEMU path and iface name in `.env` match you configuration and adjust if needed + enter absolute path to `scripts/vmScriptAlpine.sh` to `VM_SETUP_SCRIPT_PATH`
 
 ## Run
 
@@ -60,6 +60,12 @@ curl http://<VM_IP>
 
 You should get a sample HTML page with VM name and IP.
 
+### Access services
+
+- HAProxy stats: [`localhost:8080/haproxy_stats`](localhost:8080/haproxy_stats)
+- Consul: [`localhost:8500`](localhost:8500)
+- App: [`localhost`](localhost)
+
 ### Simulate fault
 
 The daemon will try to keep a given number of VMs healthy. It will perform TCP healthckecks on VMs and recreate ones that fail. You can simulate a fault by stopping the nginx server running on a VM.
@@ -79,7 +85,7 @@ virsh -c qemu:///system console <VM_NAME>
 Login (on Alpine user `root` no password) and stop the service
 
 ```shell
-service nginx stop
+service flask_app stop
 ```
 
 In a few seconds you should see warnings about failing healthchecks in logs and then the VM should be destroyed and a new one should be created in place.
@@ -102,3 +108,13 @@ pre-commit install
 ```
 
 https://libvirt-python.readthedocs.io/
+
+## Host Haproxy Consul setup
+
+```shell
+sudo bash -x scripts/consulHaproxySetup.sh
+```
+
+## Vm repo
+
+[Flask-service](https://github.com/skoda-octavia/flask-service)
