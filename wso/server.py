@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import sys
+from collections import deque
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -80,7 +81,6 @@ class Domain:
         self.ip_address = ip_address
         self.ip_subnet = ip_subnet
 
-
 class HealthCheckFailureException(Exception): ...
 
 
@@ -107,6 +107,8 @@ class Server:
                 ),
             },
         )
+
+        self._cpu_usage_window = deque(maxlen=config.CPU_CHECK_WINDOWSIZE)
 
         self._state_changed.set()
 
@@ -267,6 +269,56 @@ class Server:
                 self.logger.exception(e)
                 raise
 
+    async def _get_average_cpu_utilization(self) -> float:
+        async with self.connection_context() as conn:
+            domains = conn.listAllDomains(libvirt.VIR_CONNECT_LIST_DOMAINS_ACTIVE)
+            cpu_usages = []
+
+            for d in domains:
+                if d.isActive() == 1:
+                    try:
+                        prev_cpu_time = d.info()[4]
+                        await asyncio.sleep(1)
+                        curr_cpu_time = d.info()[4]
+                        cpu_delta = curr_cpu_time - prev_cpu_time
+                        cpu_usage = cpu_delta / 1e9
+                        cpu_usages.append(cpu_usage)
+                    except libvirt.libvirtError:
+                        continue
+
+            if not cpu_usages:
+                return 0.0
+            return sum(cpu_usages) / len(cpu_usages)
+
+    async def _autoscale_loop(self) -> None:
+        await asyncio.sleep(config.SCALE_COOLDOWN)
+        while True:
+            try:
+                avg_cpu = await self._get_average_cpu_utilization()
+                self._cpu_usage_window.append(avg_cpu)
+
+                window_avg = sum(self._cpu_usage_window) / len(self._cpu_usage_window)
+                self.logger.debug(f"CPU load temp: {avg_cpu:.3f}, window avg: {window_avg:.3f}")
+
+                if len(self._cpu_usage_window) < config.CPU_CHECK_WINDOWSIZE:
+                    pass
+                elif window_avg > config.UP_THRESHOLD and self._desired_num_vms < config.MAX_VMS:
+                    self._desired_num_vms += 1
+                    self.logger.info(f"Increasing desired VMs to {self._desired_num_vms} due to high load")
+                    self._state_changed.set()
+                    self._cpu_usage_window.clear()
+                elif window_avg < config.DOWN_THRESHOLD and self._desired_num_vms > config.MIN_VMS:
+                    self._desired_num_vms -= 1
+                    self.logger.info(f"Decreasing desired VMs to {self._desired_num_vms} due to low load")
+                    self._state_changed.set()
+                    self._cpu_usage_window.clear()
+
+            except Exception as e:
+                self.logger.error(f"Autoscaling error: {e}")
+                self.logger.exception(e)
+
+            await asyncio.sleep(config.CPU_LOAD_CHECK)
+
     async def _healthcheck_task(self, domain: Domain) -> None:
         self.logger.debug(
             f"Waiting {config.HEALTHCHECK_START_DELAY}s before starting healthcheck for domain {domain.domain_name}"
@@ -366,8 +418,8 @@ class Server:
                 )
                 for _ in range(self._desired_num_vms - len(running_domains)):
                     domain = Domain(
-                        n_cpus=1,
-                        memory_kib=1024 * 1024,
+                        n_cpus=2,
+                        memory_kib=1024 * 1024 * 5,
                         iso_path=config.ISO_PATH,
                         ip_address=self._generate_static_ip(subnet="192.168.100"),
                         ip_subnet="192.168.100",
@@ -388,6 +440,7 @@ class Server:
         await asyncio.gather(
             self.respond_to_state_change(),
             self.run_server(),
+            self._autoscale_loop(),
         )
 
     async def _cleanup(self) -> None:

@@ -204,6 +204,8 @@ runcmd:
   - ifup eth0
   - setup-apkrepos -c -1
   - apk update
+  - apk add openssh-client
+  - apk add openssh-server
   - mv /tmp/index.html /var/lib/nginx/html/index.html
   - ssh-keygen -t ed25519 -q -f "/root/.ssh/id_ed25519" -N ""
   - echo "{get_ssh_public_key()}" >> /root/.ssh/authorized_keys

@@ -134,3 +134,8 @@ sudo bash -x scripts/consulHaproxySetup.sh
 ## Vm repo
 
 [Flask-service](https://github.com/skoda-octavia/flask-service)
+
+
+## Locust
+
+After running deamon execute `locust -f wso/locustfile.py` and open [localhost:8089](http://0.0.0.0:8089/) in browser. Put HaProxy address (192.168.100.xxx) in host input and number of agents.

@@ -162,10 +162,13 @@ systemctl enable consul-template
 echo "Consul-Template Status:"
 systemctl status consul-template --no-pager
 
+
+echo "8. Setting up locust"
+sudo apt install python3-locust"
+
 echo "--- Configuration complete! ---"
 echo "Consul UI available at: http://${LOCAL_IP}:8500/ui"
 echo "HAProxy is listening on port 80."
 echo "HAProxy statistics available at: http://${LOCAL_IP}:8080/haproxy_stats"
 echo "User: admin, Password: password (CHANGE THIS IN PRODUCTION!)"
-echo "Remember to add firewall rules to open ports 80, 8080, 8500 (TCP), and 8301 (UDP)!"
-echo "On each virtual machine with the Flask service, run the 'setup_flask_vm.sh' script (with appropriate parameters)."
+echo "Run locust with locust -f wso/locustfile.py and visit http://0.0.0.0:8089/ for testing, place host address (192.168.1.xxx) in UI"
