@@ -290,6 +290,10 @@ class Server:
                 return 0.0
             return sum(cpu_usages) / len(cpu_usages)
 
+    async def _autoscale_cooldown(self) -> None:
+        self._cpu_usage_window.clear()
+        await asyncio.sleep(config.SCALE_COOLDOWN)
+
     async def _autoscale_loop(self) -> None:
         await asyncio.sleep(config.SCALE_COOLDOWN)
         while True:
@@ -306,12 +310,12 @@ class Server:
                     self._desired_num_vms += 1
                     self.logger.info(f"Increasing desired VMs to {self._desired_num_vms} due to high load")
                     self._state_changed.set()
-                    self._cpu_usage_window.clear()
+                    await self._autoscale_cooldown()
                 elif window_avg < config.DOWN_THRESHOLD and self._desired_num_vms > config.MIN_VMS:
                     self._desired_num_vms -= 1
                     self.logger.info(f"Decreasing desired VMs to {self._desired_num_vms} due to low load")
                     self._state_changed.set()
-                    self._cpu_usage_window.clear()
+                    await self._autoscale_cooldown()
 
             except Exception as e:
                 self.logger.error(f"Autoscaling error: {e}")
