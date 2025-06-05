@@ -68,7 +68,7 @@ You should get a sample HTML page with VM name and IP.
 
 ### Simulate fault
 
-The daemon will try to keep a given number of VMs healthy. It will perform TCP healthckecks on VMs and recreate ones that fail. You can simulate a fault by stopping the nginx server running on a VM.
+The daemon will try to keep a given number of VMs healthy. It will perform TCP healthckecks on VMs and recreate ones that fail. You can simulate a fault by destroying VM.
 
 Get VM names:
 
@@ -76,16 +76,10 @@ Get VM names:
 virsh -c qemu:///system list
 ```
 
-Open shell:
+Destroy:
 
 ```shell
-virsh -c qemu:///system console <VM_NAME>
-```
-
-Login (on Alpine user `root` no password) and stop the service
-
-```shell
-service flask_app stop
+virsh destroy <VM_NAME>
 ```
 
 In a few seconds you should see warnings about failing healthchecks in logs and then the VM should be destroyed and a new one should be created in place.
